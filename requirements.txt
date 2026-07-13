@@ -1,0 +1,30 @@
+# -----------------------------------------------------------------------
+# requirements.txt — Requisitos del sistema para este proyecto Node.js
+#
+# Este archivo documenta los requisitos de entorno necesarios para
+# ejecutar el proyecto. Para instalar las dependencias de Node.js,
+# usa: npm install
+# -----------------------------------------------------------------------
+
+# Runtime requerido
+Node.js >= 18.0.0 (LTS recomendado: 20.x)
+npm >= 9.0.0
+
+# Base de datos (servicio externo en la nube)
+MongoDB Atlas (cuenta gratuita disponible en https://www.mongodb.com/atlas)
+
+# Variables de entorno obligatorias (ver .env.example)
+MONGODB_URI=<cadena de conexión MongoDB Atlas>
+
+# -----------------------------------------------------------------------
+# Instalación rápida
+# -----------------------------------------------------------------------
+# 1. Clonar el repositorio
+# 2. Copiar .env.example a .env y rellenar MONGODB_URI
+# 3. npm install
+# 4. npm start
+#
+# Con Docker (sin necesidad de Node.js local):
+# 1. docker build -t repositorio-ingles .
+# 2. docker run -p 5000:5000 -e MONGODB_URI="tu_uri_aqui" repositorio-ingles
+# -----------------------------------------------------------------------
