@@ -807,33 +807,82 @@
             `
         };
 
-        if (!localStorage.getItem('real_users_db')) {
-            const defaultUsers = [
-                { username: 'admin', pass: 'admin123', fullname: 'Coordinador General / Admin', role: 'Administrador' },
-                { username: 'docente1', pass: '123', fullname: 'Lic. Jorge Eliécer Violo', role: 'Docente' },
-                { username: 'estudiante1', pass: '456', fullname: 'Carlos Mario Delgado', role: 'Estudiante' },
-                { username: 'padre1', pass: '789', fullname: 'María Consuelo Pérez', role: 'Padres de familia' }
-            ];
-            localStorage.setItem('real_users_db', JSON.stringify(defaultUsers));
-        }
-        
-        if (!localStorage.getItem('real_resources_db')) {
-            const defaultResources = [
-                { id: 1710000000001, title: 'Estrategias de Fluidez Verbal', author: 'LinguaTech Lab', level: 'B2', skill: 'Speaking', metadata: 'HTML5', type: 'Google Drive', desc: 'Desarrollo de velocidad en discursos argumentativos.', uploader: 'Lic. Jorge Eliécer Violo', link: 'https://drive.google.com/drive/folders/ejemplo', fileData: null, fileName: null, comments: [], ratings: [5, 4], downloadsCount: 2 },
-                { id: 1710000000002, title: 'Grammar Guide - Present Perfect', author: 'Cambridge Press', level: 'A2', skill: 'Grammar', metadata: 'PDF', type: 'PDF / Guía', desc: 'Guía de ejercicios gramaticales estructurados.', uploader: 'Lic. Jorge Eliécer Violo', link: null, fileData: 'data:text/plain;base64,UERGIGRlbW8=', fileName: 'present_perfect.pdf', comments: [], ratings: [4], downloadsCount: 1 }
-            ];
-            localStorage.setItem('real_resources_db', JSON.stringify(defaultResources));
-        }
-        
-        if (!localStorage.getItem('platform_stats')) {
-            localStorage.setItem('platform_stats', JSON.stringify({ views: 32, downloads: 12, logs: [] }));
-        }
-        if (!localStorage.getItem('institution_config')) {
-            localStorage.setItem('institution_config', JSON.stringify({ name: 'REPOSITORIO RED - INGLÉS DE LA I.E. DEL VIOLO', logo: '' }));
-        }
-
+        // -------------------------------------------------------------------
+        // CAPA DE DATOS: todo se guarda en el servidor (MongoDB Atlas) y se
+        // comparte entre todos los dispositivos. El navegador solo conserva
+        // una copia temporal en memoria mientras la sesión está abierta.
+        // -------------------------------------------------------------------
+        let authToken = null;
+        const Data = {
+            users: [],
+            resources: [],
+            stats: { views: 0, uploads: 0, downloads: 0, logs: [] },
+            config: { name: 'REPOSITORIO RED - INGLÉS DE LA I.E. DEL VIOLO', logo: '' }
+        };
         let sessionUser = null;
         let selectedResourceId = null;
+        let pollTimer = null;
+        const MAX_FILE_BYTES = 5 * 1024 * 1024;
+
+        function esc(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        async function api(method, url, body) {
+            const opts = { method: method, headers: {} };
+            if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
+            if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+            let res;
+            try { res = await fetch(url, opts); }
+            catch (e) { throw new Error('Sin conexión con el servidor. Revisa tu internet e intenta de nuevo.'); }
+            let data = null;
+            try { data = await res.json(); } catch (e) {}
+            if (res.status === 401 && authToken) { forceLogout('Tu sesión venció. Ingresa de nuevo.'); throw new Error('Sesión vencida'); }
+            if (!res.ok) throw new Error((data && data.error) || ('Error del servidor (' + res.status + ')'));
+            return data;
+        }
+
+        async function loadConfig() {
+            try { Data.config = await api('GET', '/api/config'); } catch (e) {}
+        }
+
+        async function loadAll() {
+            const [resources, stats, config] = await Promise.all([
+                api('GET', '/api/resources'), api('GET', '/api/stats'), api('GET', '/api/config')
+            ]);
+            Data.resources = resources; Data.stats = stats; Data.config = config;
+            Data.users = (sessionUser && sessionUser.role === 'Administrador') ? await api('GET', '/api/users') : [];
+        }
+
+        async function refreshResources() {
+            Data.resources = await api('GET', '/api/resources');
+            renderResources();
+            if (selectedResourceId) selectResource(selectedResourceId);
+        }
+
+        async function refreshUsers() {
+            if (sessionUser && sessionUser.role === 'Administrador') Data.users = await api('GET', '/api/users');
+            renderUsers();
+        }
+
+        function startPolling() {
+            stopPolling();
+            // Actualización automática cada 15 s para que todos vean lo mismo casi en tiempo real
+            pollTimer = setInterval(async () => {
+                if (!sessionUser || document.hidden) return;
+                try {
+                    const fresh = await api('GET', '/api/resources');
+                    if (JSON.stringify(fresh) !== JSON.stringify(Data.resources)) {
+                        Data.resources = fresh;
+                        renderResources();
+                        if (selectedResourceId) selectResource(selectedResourceId);
+                    }
+                    if (!document.getElementById('sec-stats').classList.contains('hidden')) await refreshStats();
+                    if (sessionUser.role === 'Administrador' && !document.getElementById('sec-admin').classList.contains('hidden')) await refreshUsers();
+                } catch (e) {}
+            }, 15000);
+        }
+        function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
         function togglePasswordVisibility(id) {
             const el = document.getElementById(id);
@@ -841,48 +890,50 @@
         }
 
         function applyInstitutionSettings() {
-            const cfg = JSON.parse(localStorage.getItem('institution_config'));
+            const cfg = Data.config;
             document.getElementById('header-institution-text').innerText = cfg.name;
-            document.getElementById('login-institution-title').innerHTML = cfg.name + "<br><small style='font-size:11px; color:#666;'>Entorno Local Garantizado</small>";
+            document.getElementById('login-institution-title').innerHTML = esc(cfg.name) + "<br><small style='font-size:11px; color:#666;'>Repositorio en la nube</small>";
             document.getElementById('site-title-tag').innerText = cfg.name;
             const logoImg = document.getElementById('header-logo');
-            if(cfg.logo) { logoImg.src = cfg.logo; logoImg.classList.remove('hidden'); } else { logoImg.classList.add('hidden'); }
+            if (cfg.logo) { logoImg.src = cfg.logo; logoImg.classList.remove('hidden'); } else { logoImg.classList.add('hidden'); }
         }
 
-        window.onload = function() {
+        window.onload = async function() {
+            await loadConfig();
             applyInstitutionSettings();
             switchManualTab("Administrador");
         };
 
-        function handleLogin() {
+        async function handleLogin() {
             const selectedRole = document.getElementById('login-role-select').value;
             const userIn = document.getElementById('login-user').value.trim();
             const passIn = document.getElementById('login-pass').value;
-            const users = JSON.parse(localStorage.getItem('real_users_db'));
-
-            const found = users.find(u => u.username === userIn && u.pass === passIn && u.role === selectedRole);
-            if (found) {
-                sessionUser = found;
+            try {
+                const r = await api('POST', '/api/login', { userIn: userIn, passIn: passIn, selectedRole: selectedRole });
+                if (!r.success) { alert("Credenciales inválidas para el rol seleccionado."); return; }
+                authToken = r.token;
+                sessionUser = r.user;
+                await loadAll();
                 document.getElementById('login-screen').style.display = 'none';
-                
-                let stats = JSON.parse(localStorage.getItem('platform_stats'));
-                stats.views += 1;
-                const now = new Date();
-                stats.logs.unshift({
-                    user: sessionUser.fullname, role: sessionUser.role, action: 'Ingresó a la plataforma', timestamp: now.toLocaleDateString() + ' ' + now.toLocaleTimeString()
-                });
-                localStorage.setItem('platform_stats', JSON.stringify(stats));
+                applyInstitutionSettings();
                 initPlatform();
-            } else {
-                alert("Credenciales inválidas para el rol seleccionado.");
+                startPolling();
+            } catch (e) {
+                authToken = null; sessionUser = null;
+                alert(e.message);
             }
         }
 
-        function handleLogout() {
-            sessionUser = null;
+        function resetToLogin() {
+            stopPolling();
+            sessionUser = null; authToken = null; selectedResourceId = null;
+            Data.users = []; Data.resources = [];
             document.getElementById('login-screen').style.display = 'flex';
             document.getElementById('login-user').value = ""; document.getElementById('login-pass').value = "";
         }
+
+        function handleLogout() { resetToLogin(); }
+        function forceLogout(msg) { resetToLogin(); if (msg) alert(msg); }
 
         function initPlatform() {
             document.getElementById('lbl-fullname').innerText = sessionUser.fullname;
@@ -897,8 +948,7 @@
             if (sessionUser.role === 'Administrador') {
                 document.getElementById('box-admin-logs').classList.remove('hidden');
                 document.getElementById('nav-admin-link').classList.remove('hidden');
-                const cfg = JSON.parse(localStorage.getItem('institution_config'));
-                document.getElementById('cfg-inst-name').value = cfg.name;
+                document.getElementById('cfg-inst-name').value = Data.config.name;
             } else {
                 document.getElementById('box-admin-logs').classList.add('hidden');
                 document.getElementById('nav-admin-link').classList.add('hidden');
@@ -908,7 +958,7 @@
             showSection('resources');
             renderResources();
             renderUsers();
-            calculateStats();
+            renderStats();
         }
 
         function showSection(section) {
@@ -917,12 +967,18 @@
             document.getElementById('sec-stats').classList.add('hidden');
             document.getElementById('sec-manuals').classList.add('hidden');
             document.getElementById('sec-' + section).classList.remove('hidden');
-            if(section === 'stats') calculateStats();
+            if (section === 'stats') calculateStats();
+            if (section === 'admin') refreshUsers().catch(() => {});
         }
 
         function handleSearchKeyup() {
             currentPage = 1;
             renderResources();
+        }
+
+        function avgOf(res) {
+            const r = res.ratings || [];
+            return r.length ? r.reduce((a, b) => a + b, 0) / r.length : 0;
         }
 
         function renderResources() {
@@ -931,19 +987,19 @@
             grid.innerHTML = "";
             pager.innerHTML = "";
 
-            const allResources = JSON.parse(localStorage.getItem('real_resources_db')) || [];
+            const allResources = Data.resources || [];
             const searchStr = document.getElementById('txt-search').value.toLowerCase().trim();
-            
+
             const selectedSkills = Array.from(document.querySelectorAll('.chk-skill:checked')).map(c => c.value);
             const selectedTypes = Array.from(document.querySelectorAll('.chk-type:checked')).map(c => c.value);
 
             let filtered = allResources.filter(res => {
-                const matchesSearch = searchStr === "" || 
-                                      res.title.toLowerCase().includes(searchStr) || 
-                                      res.author.toLowerCase().includes(searchStr) ||
-                                      res.skill.toLowerCase().includes(searchStr);
+                const matchesSearch = searchStr === "" ||
+                                      (res.title || '').toLowerCase().includes(searchStr) ||
+                                      (res.author || '').toLowerCase().includes(searchStr) ||
+                                      (res.skill || '').toLowerCase().includes(searchStr);
                 const matchesSkill = selectedSkills.includes(res.skill);
-                const matchesType = selectedTypes.some(t => res.type.includes(t.split(" ")[0]));
+                const matchesType = selectedTypes.some(t => (res.type || '').includes(t.split(" ")[0]));
                 return matchesSearch && matchesSkill && matchesType;
             });
 
@@ -954,6 +1010,8 @@
 
             const totalItems = filtered.length;
             const totalPages = Math.ceil(totalItems / itemsPerPage);
+            if (currentPage > totalPages) currentPage = totalPages;
+            if (currentPage < 1) currentPage = 1;
             const startIndex = (currentPage - 1) * itemsPerPage;
             const endIndex = startIndex + itemsPerPage;
             const paginatedItems = filtered.slice(startIndex, endIndex);
@@ -962,22 +1020,21 @@
                 let showActions = (sessionUser.role === 'Administrador' || sessionUser.role === 'Docente');
                 let actionButtons = showActions ? `
                     <div class="card-actions">
-                        <button class="btn-mini btn-edit" onclick="event.stopPropagation(); openResourceModal(true, ${res.id})">Editar</button>
-                        <button class="btn-mini btn-delete" onclick="event.stopPropagation(); deleteResource(${res.id})">Borrar</button>
+                        <button class="btn-mini btn-edit" onclick="event.stopPropagation(); openResourceModal(true, '${esc(res.id)}')">Editar</button>
+                        <button class="btn-mini btn-delete" onclick="event.stopPropagation(); deleteResource('${esc(res.id)}')">Borrar</button>
                     </div>
                 ` : '';
 
-                let sum = res.ratings ? res.ratings.reduce((a,b)=>a+b, 0) : 0;
-                let avg = res.ratings && res.ratings.length ? (sum/res.ratings.length).toFixed(1) : "0.0";
+                const avg = avgOf(res).toFixed(1);
 
                 grid.innerHTML += `
-                    <div class="card" onclick="selectResource(${res.id})">
-                        <span class="card-badge">${res.type}</span>
-                        <div class="card-title">${res.title}</div>
-                        <div class="card-meta-line"><strong>Autor:</strong> ${res.author}</div>
-                        <div class="card-meta-line"><strong>Nivel:</strong> ${res.level || 'General'}</div>
-                        <div class="card-uploader">Por: ${res.uploader}</div>
-                        <div class="card-tags"><span class="tag">#${res.skill}</span></div>
+                    <div class="card" onclick="selectResource('${esc(res.id)}')">
+                        <span class="card-badge">${esc(res.type)}</span>
+                        <div class="card-title">${esc(res.title)}</div>
+                        <div class="card-meta-line"><strong>Autor:</strong> ${esc(res.author)}</div>
+                        <div class="card-meta-line"><strong>Nivel:</strong> ${esc(res.level || 'General')}</div>
+                        <div class="card-uploader">Por: ${esc(res.uploader)}</div>
+                        <div class="card-tags"><span class="tag">#${esc(res.skill)}</span></div>
                         <div class="card-footer">
                             <div class="card-rating">★ ${avg}</div>
                             ${actionButtons}
@@ -1001,10 +1058,22 @@
             renderResources();
         }
 
+        async function downloadStoredFile(id) {
+            try {
+                const f = await api('GET', '/api/resources/' + encodeURIComponent(id) + '/file');
+                const blob = await (await fetch(f.fileData)).blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = f.fileName || 'archivo';
+                document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
+                trackDownload(id);
+            } catch (e) { alert(e.message); }
+        }
+
         function selectResource(id) {
             selectedResourceId = id;
-            const resources = JSON.parse(localStorage.getItem('real_resources_db'));
-            const res = resources.find(r => r.id === id);
+            const res = (Data.resources || []).find(r => r.id === id);
             if (!res) return;
 
             document.getElementById('det-title').innerText = res.title;
@@ -1016,66 +1085,55 @@
             document.getElementById('det-skill').innerText = res.skill;
             document.getElementById('det-desc').innerText = res.desc || "Sin descripción.";
 
-            let sum = res.ratings ? res.ratings.reduce((a,b)=>a+b, 0) : 0;
-            let avg = res.ratings && res.ratings.length ? (sum/res.ratings.length).toFixed(1) : "0.0";
-            document.getElementById('lbl-avg-rating').innerText = avg;
+            document.getElementById('lbl-avg-rating').innerText = avgOf(res).toFixed(1);
 
             const dlBtn = document.getElementById('btn-download-link');
+            dlBtn.removeAttribute('download');
 
             if (res.link) {
-                document.getElementById('det-source').innerHTML = `<a href="${res.link}" target="_blank" style="color:var(--secondary); font-weight:bold; word-break:break-all;">${res.link}</a>`;
+                document.getElementById('det-source').innerHTML = `<a href="${esc(res.link)}" target="_blank" rel="noopener" style="color:var(--secondary); font-weight:bold; word-break:break-all;">${esc(res.link)}</a>`;
                 dlBtn.href = res.link;
                 dlBtn.innerText = "Abrir Google Drive / Enlace";
-                dlBtn.onclick = function() { trackDownload(res.id); window.open(res.link, '_blank'); return false; };
-            } else if (res.fileData) {
-                document.getElementById('det-source').innerText = res.fileName;
-                dlBtn.href = res.fileData;
-                dlBtn.setAttribute('download', res.fileName);
-                dlBtn.innerText = "Descargar Archivo Local";
-                dlBtn.onclick = function() { trackDownload(res.id); };
+                dlBtn.onclick = function() { trackDownload(res.id); window.open(res.link, '_blank', 'noopener'); return false; };
+            } else if (res.hasFile) {
+                document.getElementById('det-source').innerText = res.fileName || 'archivo';
+                dlBtn.href = "#";
+                dlBtn.innerText = "Descargar Archivo";
+                dlBtn.onclick = function() { downloadStoredFile(res.id); return false; };
             } else {
                 document.getElementById('det-source').innerText = "Sin adjunto";
                 dlBtn.innerText = "No requiere acción";
                 dlBtn.href = "#";
+                dlBtn.onclick = function() { return false; };
             }
 
             const commentsList = document.getElementById('det-comments-list');
             commentsList.innerHTML = "";
-            if(res.comments && res.comments.length > 0) {
-                res.comments.forEach(c => { commentsList.innerHTML += `<div><strong>${c.user}:</strong> ${c.text}</div>`; });
+            if (res.comments && res.comments.length > 0) {
+                res.comments.forEach(c => { commentsList.innerHTML += `<div><strong>${esc(c.user)}:</strong> ${esc(c.text)}</div>`; });
             } else {
                 commentsList.innerHTML = "<em>Sin retroalimentación.</em>";
             }
         }
 
-        function submitRating(val) {
-            if(!selectedResourceId) return;
-            let resources = JSON.parse(localStorage.getItem('real_resources_db'));
-            let res = resources.find(r => r.id === selectedResourceId);
-            if(res) {
-                if(!res.ratings) res.ratings = [];
-                res.ratings.push(val);
-                localStorage.setItem('real_resources_db', JSON.stringify(resources));
-                selectResource(selectedResourceId);
-                renderResources();
-            }
+        async function submitRating(val) {
+            if (!selectedResourceId) return;
+            try {
+                await api('POST', '/api/resources/' + encodeURIComponent(selectedResourceId) + '/rate', { rating: val });
+                await refreshResources();
+            } catch (e) { alert(e.message); }
         }
 
         function trackDownload(id) {
-            let resources = JSON.parse(localStorage.getItem('real_resources_db'));
-            let res = resources.find(r => r.id === id);
-            if(res) { res.downloadsCount = (res.downloadsCount || 0) + 1; localStorage.setItem('real_resources_db', JSON.stringify(resources)); }
-            let stats = JSON.parse(localStorage.getItem('platform_stats'));
-            stats.downloads += 1;
-            localStorage.setItem('platform_stats', JSON.stringify(stats));
+            api('POST', '/api/stats/download', { resourceId: id }).catch(() => {});
         }
 
         function openResourceModal(isEdit, id = null) {
             document.getElementById('modal-resource').style.display = 'flex';
             document.getElementById('form-res-file').value = "";
             if (isEdit) {
-                const resources = JSON.parse(localStorage.getItem('real_resources_db'));
-                const res = resources.find(r => r.id === id);
+                const res = Data.resources.find(r => r.id === id);
+                if (!res) return;
                 document.getElementById('form-res-id').value = res.id;
                 document.getElementById('form-res-title').value = res.title;
                 document.getElementById('form-res-author').value = res.author;
@@ -1093,7 +1151,9 @@
             }
         }
 
+        let savingResource = false;
         function saveResource() {
+            if (savingResource) return;
             const id = document.getElementById('form-res-id').value;
             const title = document.getElementById('form-res-title').value.trim();
             const author = document.getElementById('form-res-author').value.trim();
@@ -1106,25 +1166,24 @@
             const fileInput = document.getElementById('form-res-file');
 
             if (!title || !author) { alert("Suministre título y creador."); return; }
-            let resources = JSON.parse(localStorage.getItem('real_resources_db'));
+            if (link && !/^https?:\/\//i.test(link)) { alert("El enlace debe comenzar por http:// o https://"); return; }
+            if (fileInput.files.length > 0 && fileInput.files[0].size > MAX_FILE_BYTES) {
+                alert("El archivo supera 5 MB. Para archivos grandes súbelos a Google Drive y pega el enlace.");
+                return;
+            }
 
-            const proceedSave = (fileDataUrl = null, fileName = null) => {
-                if (id) {
-                    let res = resources.find(r => r.id == id);
-                    res.title = title; res.author = author; res.level = level; res.metadata = metadata;
-                    res.type = type; res.skill = skill; res.desc = desc; res.link = link || null;
-                    if (fileDataUrl) { res.fileData = fileDataUrl; res.fileName = fileName; }
-                } else {
-                    resources.push({
-                        id: Date.now(), title: title, author: author, level: level || "A1", 
-                        metadata: metadata || "Ninguno", type: type, skill: skill, desc: desc,
-                        uploader: sessionUser.fullname, link: link || null, fileData: fileDataUrl, fileName: fileName,
-                        comments: [], ratings: [], downloadsCount: 0
-                    });
-                }
-                localStorage.setItem('real_resources_db', JSON.stringify(resources));
-                closeModal('modal-resource');
-                renderResources();
+            const proceedSave = async (fileDataUrl = null, fileName = null) => {
+                const body = { title: title, author: author, level: level || "A1", metadata: metadata || "Ninguno",
+                               type: type, skill: skill, desc: desc, link: link };
+                if (fileDataUrl) { body.fileData = fileDataUrl; body.fileName = fileName; }
+                savingResource = true;
+                try {
+                    if (id) await api('PUT', '/api/resources/' + encodeURIComponent(id), body);
+                    else await api('POST', '/api/resources', body);
+                    closeModal('modal-resource');
+                    await refreshResources();
+                } catch (e) { alert(e.message); }
+                savingResource = false;
             };
 
             if (fileInput.files.length > 0) {
@@ -1137,26 +1196,24 @@
             }
         }
 
-        function deleteResource(id) {
+        async function deleteResource(id) {
             if (confirm("¿Eliminar este recurso?")) {
-                let resources = JSON.parse(localStorage.getItem('real_resources_db'));
-                resources = resources.filter(r => r.id !== id);
-                localStorage.setItem('real_resources_db', JSON.stringify(resources));
-                renderResources();
+                try {
+                    await api('DELETE', '/api/resources/' + encodeURIComponent(id));
+                    if (selectedResourceId === id) selectedResourceId = null;
+                    await refreshResources();
+                } catch (e) { alert(e.message); }
             }
         }
 
-        function addComment() {
+        async function addComment() {
             const txt = document.getElementById('txt-new-comment');
             if (!txt.value.trim() || !selectedResourceId) return;
-            let resources = JSON.parse(localStorage.getItem('real_resources_db'));
-            let res = resources.find(r => r.id === selectedResourceId);
-            if (res) {
-                res.comments.push({ user: sessionUser.fullname, text: txt.value.trim() });
-                localStorage.setItem('real_resources_db', JSON.stringify(resources));
+            try {
+                await api('POST', '/api/resources/' + encodeURIComponent(selectedResourceId) + '/comment', { text: txt.value.trim() });
                 txt.value = "";
-                selectResource(selectedResourceId);
-            }
+                await refreshResources();
+            } catch (e) { alert(e.message); }
         }
 
         function switchManualTab(roleKey) {
@@ -1179,9 +1236,19 @@
             html2pdf().set(opt).from(element).save();
         }
 
+        async function refreshStats() {
+            Data.stats = await api('GET', '/api/stats');
+            renderStats();
+        }
+
         function calculateStats() {
-            const globalStats = JSON.parse(localStorage.getItem('platform_stats'));
-            const resources = JSON.parse(localStorage.getItem('real_resources_db')) || [];
+            renderStats();
+            refreshStats().catch(() => {});
+        }
+
+        function renderStats() {
+            const globalStats = Data.stats || { views: 0, downloads: 0, logs: [] };
+            const resources = Data.resources || [];
 
             document.getElementById('st-global-views').innerText = globalStats.views;
             document.getElementById('st-global-uploads').innerText = resources.length;
@@ -1191,7 +1258,7 @@
             logContainer.innerHTML = "";
             if (globalStats.logs && globalStats.logs.length > 0) {
                 globalStats.logs.forEach(l => {
-                    logContainer.innerHTML += `<div>[${l.timestamp}] <strong>${l.user}</strong>: ${l.action}</div>`;
+                    logContainer.innerHTML += `<div>[${esc(l.timestamp)}] <strong>${esc(l.user)}</strong>: ${esc(l.action)}</div>`;
                 });
             } else {
                 logContainer.innerHTML = "Sin registros.";
@@ -1199,18 +1266,17 @@
 
             const barsContainer = document.getElementById('stats-bars-container');
             barsContainer.innerHTML = "";
-            if(resources.length === 0) {
+            if (resources.length === 0) {
                 barsContainer.innerHTML = "<p style='font-size:12px; color:#666;'>No hay materiales para evaluar.</p>";
                 return;
             }
             resources.forEach(res => {
-                let sum = res.ratings ? res.ratings.reduce((a,b)=>a+b, 0) : 0;
-                let avg = res.ratings && res.ratings.length ? (sum/res.ratings.length) : 0;
-                let pct = (avg / 5) * 100;
+                const avg = avgOf(res);
+                const pct = (avg / 5) * 100;
                 barsContainer.innerHTML += `
                     <div style="font-size:12px;">
                         <div style="display:flex; justify-content:space-between; margin-bottom:2px;">
-                            <strong>${res.title}</strong>
+                            <strong>${esc(res.title)}</strong>
                             <span>${avg.toFixed(1)} / 5</span>
                         </div>
                         <div style="background:#eee; border-radius:4px; width:100%; height:10px; overflow:hidden;">
@@ -1223,9 +1289,9 @@
 
         function openUserModal(isEdit, username = '') {
             document.getElementById('modal-user').style.display = 'flex';
-            if(isEdit) {
-                let users = JSON.parse(localStorage.getItem('real_users_db'));
-                let u = users.find(x => x.username === username);
+            if (isEdit) {
+                let u = Data.users.find(x => x.username === username);
+                if (!u) return;
                 document.getElementById('form-user-original-username').value = username;
                 document.getElementById('form-user-username').value = u.username;
                 document.getElementById('form-user-fullname').value = u.fullname;
@@ -1233,13 +1299,13 @@
                 document.getElementById('form-user-pass').value = u.pass;
             } else {
                 document.getElementById('form-user-original-username').value = "";
-                document.getElementById('form-user-username').value = ""; 
-                document.getElementById('form-user-fullname').value = ""; 
+                document.getElementById('form-user-username').value = "";
+                document.getElementById('form-user-fullname').value = "";
                 document.getElementById('form-user-pass').value = "";
             }
         }
 
-        function saveUser() {
+        async function saveUser() {
             const originalUsername = document.getElementById('form-user-original-username').value;
             const user = document.getElementById('form-user-username').value.trim();
             const name = document.getElementById('form-user-fullname').value.trim();
@@ -1247,45 +1313,40 @@
             const pass = document.getElementById('form-user-pass').value;
 
             if (!user || !name || !pass) { alert("Complete todos los campos."); return; }
-            let users = JSON.parse(localStorage.getItem('real_users_db'));
+            if (user === 'admin' && originalUsername !== 'admin') { alert("Ese Nombre de Usuario ya está en uso por otra cuenta."); return; }
 
-            if(originalUsername) {
-                if (user !== originalUsername && users.some(u => u.username === user)) {
-                    alert("Ese Nombre de Usuario ya está en uso por otra cuenta.");
-                    return;
+            try {
+                if (originalUsername) {
+                    if (user !== originalUsername && Data.users.some(u => u.username === user)) {
+                        alert("Ese Nombre de Usuario ya está en uso por otra cuenta.");
+                        return;
+                    }
+                    await api('PUT', '/api/users/' + encodeURIComponent(originalUsername), { newUsername: user, name: name, role: role, pass: pass });
+                } else {
+                    if (Data.users.some(u => u.username === user)) { alert("Este ID/Usuario ya está registrado."); return; }
+                    await api('POST', '/api/users', { user: user, name: name, role: role, pass: pass });
                 }
-                let u = users.find(x => x.username === originalUsername);
-                if(u) { 
-                    u.username = user;
-                    u.fullname = name; 
-                    u.role = role; 
-                    u.pass = pass; 
-                }
-            } else {
-                if (users.some(u => u.username === user)) { alert("Este ID/Usuario ya está registrado."); return; }
-                users.push({ username: user, pass: pass, fullname: name, role: role });
-            }
-            localStorage.setItem('real_users_db', JSON.stringify(users));
-            closeModal('modal-user'); 
-            renderUsers();
+                closeModal('modal-user');
+                await refreshUsers();
+            } catch (e) { alert(e.message); }
         }
 
         function renderUsers() {
             const tbody = document.getElementById('user-list-body');
             tbody.innerHTML = "";
-            const users = JSON.parse(localStorage.getItem('real_users_db')) || [];
+            const users = Data.users || [];
             users.forEach(u => {
-                if(u.username === 'admin') return; 
-                tbody.innerHTML += `<tr><td>${u.username}</td><td>${u.fullname}</td><td>${u.role}</td><td><code>${u.pass}</code></td><td><button class="btn-mini btn-edit" onclick="openUserModal(true, '${u.username}')">Modificar Usuario</button> <button class="btn-mini btn-delete" onclick="deleteUser('${u.username}')">Borrar</button></td></tr>`;
+                if (u.username === 'admin') return;
+                tbody.innerHTML += `<tr><td>${esc(u.username)}</td><td>${esc(u.fullname)}</td><td>${esc(u.role)}</td><td><code>${esc(u.pass)}</code></td><td><button class="btn-mini btn-edit" data-u="${esc(u.username)}" onclick="openUserModal(true, this.dataset.u)">Modificar Usuario</button> <button class="btn-mini btn-delete" data-u="${esc(u.username)}" onclick="deleteUser(this.dataset.u)">Borrar</button></td></tr>`;
             });
         }
 
-        function deleteUser(username) {
-            if(confirm("¿Eliminar credencial?")) {
-                let users = JSON.parse(localStorage.getItem('real_users_db'));
-                users = users.filter(u => u.username !== username);
-                localStorage.setItem('real_users_db', JSON.stringify(users));
-                renderUsers();
+        async function deleteUser(username) {
+            if (confirm("¿Eliminar credencial?")) {
+                try {
+                    await api('DELETE', '/api/users/' + encodeURIComponent(username));
+                    await refreshUsers();
+                } catch (e) { alert(e.message); }
             }
         }
 
@@ -1296,54 +1357,56 @@
             document.getElementById('form-self-pass').value = sessionUser.pass;
         }
 
-        function saveSelfUpdate() {
+        async function saveSelfUpdate() {
             const newUsername = document.getElementById('form-self-username').value.trim();
             const newName = document.getElementById('form-self-name').value.trim();
             const newPass = document.getElementById('form-self-pass').value;
 
-            if(!newUsername || !newName || !newPass) {
+            if (!newUsername || !newName || !newPass) {
                 alert("Ningún campo puede quedar vacío.");
                 return;
             }
 
-            let users = JSON.parse(localStorage.getItem('real_users_db'));
-            
-            if (newUsername !== sessionUser.username && users.some(x => x.username === newUsername)) {
-                alert("El nombre de usuario ingresado ya está ocupado por otra persona.");
-                return;
-            }
-
-            let u = users.find(x => x.username === sessionUser.username);
-            if(u) {
-                u.username = newUsername;
-                u.fullname = newName;
-                u.pass = newPass;
-                
-                localStorage.setItem('real_users_db', JSON.stringify(users));
-                sessionUser = u;
-                
+            try {
+                const r = await api('PUT', '/api/users/' + encodeURIComponent(sessionUser.username),
+                                    { newUsername: newUsername, name: newName, pass: newPass });
+                sessionUser = r.user;
+                if (r.token) authToken = r.token;
                 document.getElementById('lbl-fullname').innerText = sessionUser.fullname;
                 closeModal('modal-self-update');
-                renderUsers();
+                await refreshUsers();
                 alert("Tus credenciales de ingreso se han actualizado correctamente.");
-            }
+            } catch (e) { alert(e.message); }
         }
 
-        function saveInstitutionConfig() {
-            let cfg = { name: document.getElementById('cfg-inst-name').value.trim(), logo: '' };
+        async function saveInstitutionConfig() {
+            const name = document.getElementById('cfg-inst-name').value.trim();
+            if (!name) { alert("El nombre no puede estar vacío."); return; }
             const file = document.getElementById('cfg-inst-logo').files[0];
-            if(file) {
+            const persist = async (logo) => {
+                try {
+                    await api('POST', '/api/config', { name: name, logo: logo });
+                    Data.config = { name: name, logo: logo };
+                    applyInstitutionSettings();
+                    alert("Guardado.");
+                } catch (e) { alert(e.message); }
+            };
+            if (file) {
+                if (file.size > 2 * 1024 * 1024) { alert("El logo no debe superar 2 MB."); return; }
                 const r = new FileReader();
-                r.onload = function(e) { cfg.logo = e.target.result; localStorage.setItem('institution_config', JSON.stringify(cfg)); applyInstitutionSettings(); alert("Guardado."); };
+                r.onload = function(e) { persist(e.target.result); };
                 r.readAsDataURL(file);
             } else {
-                localStorage.setItem('institution_config', JSON.stringify(cfg)); applyInstitutionSettings(); alert("Guardado.");
+                persist(Data.config.logo || '');
             }
         }
 
-        function deleteInstitutionLogo() {
-            let cfg = JSON.parse(localStorage.getItem('institution_config')); cfg.logo = "";
-            localStorage.setItem('institution_config', JSON.stringify(cfg)); applyInstitutionSettings();
+        async function deleteInstitutionLogo() {
+            try {
+                await api('POST', '/api/config', { name: Data.config.name, logo: '' });
+                Data.config.logo = '';
+                applyInstitutionSettings();
+            } catch (e) { alert(e.message); }
         }
 
         function closeModal(id) { document.getElementById(id).style.display = 'none'; }
